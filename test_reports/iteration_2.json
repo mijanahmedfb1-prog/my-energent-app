@@ -1,0 +1,45 @@
+{
+  "summary": "Backend-only retest for the AI-hotspot image bug (Bengali user report: images not matching the spot). New pytest suite /app/backend/tests/test_hotspots_discover.py runs 6 tests against POST /api/hotspots/discover for Dhaka, Cairo, and Istanbul plus auth guards and cache determinism. All 6 tests PASS (100%). Every returned hotspot across all 3 cities has an image on upload.wikimedia.org (real photograph), zero SVGs, zero unsplash fallbacks, and every hotspot exposes the new `wikipedia_title` field. Landmark filename match verified: Lalbagh Fort / Ahsan Manzil / Liberation War Museum (Dhaka), Great Pyramid of Giza + Great Sphinx of Giza (Cairo), Hagia Sophia (Istanbul). Second call w/o force_refresh returns source=='cache' with identical image_urls in <10s. 401 without token and 402 without active subscription both confirmed. Bug fix is verified working.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/hotspots/discover",
+        "issue": "For a few landmarks the Wikimedia PageImages primary image is stored under a native-language filename (e.g. Lalbagh Fort -> `%E0%A6%B2%E0%A6%BE%E0%A6%B2_%E0%A6%95%E0%A7%87%E0%A6%B2%E0%A7%8D%E0%A6%B2%E0%A6%BE%E0%A6%B0_%E0%A6%AE%E0%A6%BE%E0%A6%AF%E0%A6%BC%E0%A6%BE.jpg` which is Bengali `Lal_kellar_maya.jpg`). The photo is genuinely of that landmark (verified manually) so this is not a functional bug, but a filename-token match against the English hotspot name will fail. Consider using the pageimage `original.source` returned by the API as the canonical URL (already used) - no code change required, just noting for future landmark-name QA."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_hotspots_discover.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "No action required — image-quality bug fix is verified working across Dhaka, Cairo, Istanbul. All 6 tests pass at 100%.",
+    "(Optional cosmetic) If English-filename matching is a UX requirement (e.g. for share cards), add an extra pass in _fetch_place_image that prefers files whose name contains ASCII tokens from the hotspot's English name over native-script filenames. Currently the Bengali/Arabic-named JPGs are still real Wikipedia photos of the correct landmark."
+  ],
+  "critical_code_review_comments": [
+    "_fetch_place_image cascade (wiki_title -> clean-name -> opensearch -> commons-search -> curated fallback) is well-ordered; the AI-supplied wikipedia_title is now the first hop which resolves the bug root cause.",
+    "server.py is still ~1184 lines (grew from 795). Splitting into routers is now more urgent — the discover flow alone spans models + AI prompt + 4 image helpers + endpoint over ~250 lines.",
+    "In discover_hotspots, `delete_many({cache_key: ...})` is called before `insert_one` per spot; if any insert fails after some succeed, the cache is left partial and the next non-force call could return <4 items and silently trigger another paid AI call. Consider inserting many in one batch inside a try/except.",
+    "Return payload uses both `entry_fee_usd` and `entry_fee_foreigner_usd` with identical values — one is redundant.",
+    "AI prompt allows `wikipedia_title` to be empty string; the fallback chain handles it fine, but consider logging when it comes back empty to catch prompt regressions."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_hotspots_discover.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/iteration_2.json"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Reuses primary test@guardtrip.com/test1234 account (login-or-register-and-activate-month). Creates one throwaway non-premium user (nopremium_<uuid>@guardtrip.example.com / test1234) for the 402 auth-guard test. The Dhaka/Cairo/Istanbul AI discover calls populate the `hotspots` collection with 18 documents under cache_keys ai:dhaka:bangladesh, ai:cairo:egypt, ai:istanbul:turkey — kept intentionally (used by the cache-determinism test).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `python -m pytest backend/tests/test_hotspots_discover.py -v -n 0` from /app (needs -n 0; xdist would break the module-level STATE dict). Total run time ~65s (three fresh AI+Wikipedia calls, ~20s each). Uses EXPO_PUBLIC_BACKEND_URL from /app/frontend/.env. If you rerun without invalidating cache, the parametrised city tests still pass because they use force_refresh=True. To force fresh generation but keep money savings, run only one city: `pytest 'backend/tests/test_hotspots_discover.py::test_discover_returns_real_landmark_images[istanbul]' -v -n 0 -s`.",
+  "rca_of_issue": "Original bug: image_url for AI-discovered spots did not depict the actual place because the previous code used a generic search string (name+city) against Wikipedia opensearch, which often disambiguated to unrelated pages, and on failure fell back to curated Unsplash stock photos. Fix applied by main agent: (1) AI prompt now instructs Claude Sonnet 4.6 to also return the EXACT English Wikipedia article title; (2) _fetch_place_image first calls Wikipedia PageImages API with that title, then cleaned-name, then opensearch, then Commons file search, and only lastly a curated stock photo. Verification (this run): 18/18 hotspots across Dhaka/Cairo/Istanbul returned real wikimedia.org photographs — no SVGs, no unsplash, no disambig covers. Bug is fully mitigated."
+}

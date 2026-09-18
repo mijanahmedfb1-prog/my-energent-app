@@ -359,6 +359,72 @@ def _clean_place(name: str) -> str:
 WIKI_UA = "GuardTrip/1.0 (https://guardtrip.app; support@guardtrip.app) httpx"
 
 
+async def _wiki_pageimage(client: httpx.AsyncClient, title: str) -> Optional[str]:
+    """Use PageImages API to fetch the main/lead image of a Wikipedia article."""
+    try:
+        url = (
+            "https://en.wikipedia.org/w/api.php?action=query&format=json&redirects=1"
+            "&prop=pageimages&piprop=original|thumbnail&pithumbsize=1000&titles="
+            + _urlparse.quote(title)
+        )
+        r = await client.get(url, headers={"User-Agent": WIKI_UA, "Accept": "application/json"})
+        if r.status_code == 200:
+            data = r.json()
+            pages = ((data.get("query") or {}).get("pages") or {})
+            for _, page in pages.items():
+                orig = (page.get("original") or {}).get("source")
+                thumb = (page.get("thumbnail") or {}).get("source")
+                for cand in (orig, thumb):
+                    if not cand:
+                        continue
+                    lower = cand.lower()
+                    # Skip vector/diagram/disambig placeholders — we want real photos
+                    if lower.endswith(".svg") or ".svg?" in lower:
+                        continue
+                    if "disambig" in lower or "commons-logo" in lower:
+                        continue
+                    return cand
+    except Exception:
+        pass
+    return None
+
+
+async def _commons_search_image(client: httpx.AsyncClient, query: str) -> Optional[str]:
+    """Search Wikimedia Commons (namespace 6) for a photo of the place."""
+    try:
+        # Search files
+        s_url = (
+            "https://commons.wikimedia.org/w/api.php?action=query&format=json&list=search"
+            "&srnamespace=6&srlimit=5&srsearch=" + _urlparse.quote(query + " filetype:bitmap")
+        )
+        r = await client.get(s_url, headers={"User-Agent": WIKI_UA, "Accept": "application/json"})
+        if r.status_code != 200:
+            return None
+        results = ((r.json().get("query") or {}).get("search") or [])
+        for hit in results:
+            title = hit.get("title")
+            if not title or not title.lower().startswith("file:"):
+                continue
+            i_url = (
+                "https://commons.wikimedia.org/w/api.php?action=query&format=json"
+                "&prop=imageinfo&iiprop=url|size|mime&iiurlwidth=1000&titles="
+                + _urlparse.quote(title)
+            )
+            r2 = await client.get(i_url, headers={"User-Agent": WIKI_UA, "Accept": "application/json"})
+            if r2.status_code == 200:
+                pages = ((r2.json().get("query") or {}).get("pages") or {})
+                for _, page in pages.items():
+                    infos = page.get("imageinfo") or []
+                    if infos:
+                        info = infos[0]
+                        mime = info.get("mime", "")
+                        if "image" in mime and "svg" not in mime:
+                            return info.get("thumburl") or info.get("url")
+    except Exception:
+        pass
+    return None
+
+
 async def _wiki_summary_image(client: httpx.AsyncClient, title: str) -> Optional[str]:
     try:
         url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{_urlparse.quote(title.replace(' ', '_'))}"
@@ -388,25 +454,37 @@ async def _wiki_opensearch(client: httpx.AsyncClient, query: str) -> Optional[st
     return None
 
 
-async def _fetch_place_image(place: str, city: str, idx: int) -> str:
+async def _fetch_place_image(place: str, city: str, idx: int, wiki_title: Optional[str] = None) -> str:
+    """
+    Order of attempts to get a REAL photo of the exact landmark:
+      1. Wikipedia page image using the AI-supplied `wiki_title` (usually spot-on)
+      2. Wikipedia page image on the cleaned name
+      3. Wikipedia opensearch("<name> <city>") -> page image
+      4. Wikimedia Commons search("<name> <city>")
+      5. Curated fallback image
+    """
     clean = _clean_place(place)
-    async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
-        # 1) direct summary
-        img = await _wiki_summary_image(client, clean)
+    async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+        # 1. AI-supplied Wikipedia title
+        if wiki_title:
+            img = await _wiki_pageimage(client, wiki_title)
+            if img:
+                return img
+        # 2. Direct pageimage on clean name
+        img = await _wiki_pageimage(client, clean)
         if img:
             return img
-        # 2) opensearch → best-matching title → summary
+        # 3. Search "<name> <city>" then pageimage
         title = await _wiki_opensearch(client, f"{clean} {city}")
         if title:
-            img = await _wiki_summary_image(client, title)
+            img = await _wiki_pageimage(client, title)
             if img:
                 return img
-        # 3) opensearch on just the name
-        title = await _wiki_opensearch(client, clean)
-        if title:
-            img = await _wiki_summary_image(client, title)
-            if img:
-                return img
+        # 4. Commons file search for "<name> <city>"
+        img = await _commons_search_image(client, f"{clean} {city}")
+        if img:
+            return img
+        # 5. Fallback
     return FALLBACK_IMAGES[idx % len(FALLBACK_IMAGES)]
 
 
@@ -433,7 +511,9 @@ async def _generate_ai_hotspots(city: str, country: str, lat: float, lng: float)
         + (f", {country}" if country else "")
         + f" near coordinates ({lat:.4f}, {lng:.4f}). "
         "Give me 6 must-visit spots for the next 2 days. Return a JSON array where each element is: "
-        "{name: string (well-known landmark or district name), "
+        "{name: string (well-known landmark or district name, matching its common English name), "
+        "wikipedia_title: string (EXACT English Wikipedia article title for this specific place, "
+        "e.g. 'Eiffel Tower', 'Lalbagh Fort', 'Great Pyramid of Giza'; empty string only if truly no Wikipedia article), "
         "description: string (one crisp sentence), "
         "lat: number, lng: number, "
         "entry_fee_local: string (in local currency, or 'Free'), "
@@ -489,7 +569,12 @@ async def discover_hotspots(body: DiscoverReq, user: dict = Depends(require_prem
     # Fetch images in parallel to keep response snappy
     candidates = [s for s in raw_spots[:8] if str(s.get("name", "")).strip()]
     image_urls = await asyncio.gather(*[
-        _fetch_place_image(str(s["name"]).strip(), city, i) for i, s in enumerate(candidates)
+        _fetch_place_image(
+            str(s["name"]).strip(),
+            city,
+            i,
+            wiki_title=str(s.get("wikipedia_title") or "").strip() or None,
+        ) for i, s in enumerate(candidates)
     ])
 
     saved = []
@@ -501,6 +586,7 @@ async def discover_hotspots(body: DiscoverReq, user: dict = Depends(require_prem
             "city": city,
             "country": country or "Unknown",
             "name": name,
+            "wikipedia_title": str(s.get("wikipedia_title") or "").strip(),
             "description": str(s.get("description", "")).strip()[:280],
             "image_url": image_url,
             "lat": float(s.get("lat") or body.lat),
