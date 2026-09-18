@@ -69,4 +69,11 @@ export const api = {
   createAlert: (b: any) => request("/alerts", { method: "POST", body: JSON.stringify(b) }),
 
   offlinePack: (city: string) => request(`/offline/pack?city=${encodeURIComponent(city)}`),
+
+  walletToday: () => request("/wallet/today"),
+  walletHistory: (days = 7) => request(`/wallet/history?days=${days}`),
+  addExpense: (b: any) => request("/wallet/expenses", { method: "POST", body: JSON.stringify(b) }),
+  deleteExpense: (id: string) => request(`/wallet/expenses/${id}`, { method: "DELETE" }),
+  setBudget: (daily_budget_usd: number) =>
+    request("/wallet/budget", { method: "POST", body: JSON.stringify({ daily_budget_usd }) }),
 };

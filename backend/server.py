@@ -58,6 +58,7 @@ class UserOut(BaseModel):
     subscription_tier: Optional[str] = None
     subscription_expires_at: Optional[str] = None
     current_city: Optional[str] = None
+    daily_budget_usd: float = 80.0
 
 class SubscribeReq(BaseModel):
     tier: Literal["week", "month", "year"]
@@ -122,6 +123,18 @@ class ExpensePredictReq(BaseModel):
     from_lng: Optional[float] = None
 
 
+class BudgetSet(BaseModel):
+    daily_budget_usd: float
+
+
+class ExpenseCreate(BaseModel):
+    amount_usd: float
+    category: Literal["food", "transit", "entry", "activity", "shopping", "lodging", "other"]
+    note: Optional[str] = None
+    city: Optional[str] = None
+
+
+
 # ============================================================================
 # HELPERS
 # ============================================================================
@@ -175,6 +188,7 @@ def user_to_out(user: dict) -> UserOut:
         subscription_tier=user.get("subscription_tier"),
         subscription_expires_at=user.get("subscription_expires_at"),
         current_city=user.get("current_city"),
+        daily_budget_usd=float(user.get("daily_budget_usd") or 80.0),
     )
 
 
@@ -517,6 +531,84 @@ async def expense_predict(body: ExpensePredictReq, user: dict = Depends(require_
     except Exception:
         tip = "Bring small local cash for entry. Watch for 'skip the line' resellers charging 2x."
     return {"hotspot": hs, "ai_tip": tip if isinstance(tip, str) else str(tip)}
+
+
+# ============================================================================
+# TRIP WALLET
+# ============================================================================
+
+def today_str() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+@api_router.post("/wallet/budget")
+async def set_budget(body: BudgetSet, user: dict = Depends(require_premium)):
+    if body.daily_budget_usd < 1 or body.daily_budget_usd > 10000:
+        raise HTTPException(400, "Budget must be between 1 and 10000 USD")
+    await db.users.update_one({"id": user["id"]},
+                              {"$set": {"daily_budget_usd": float(body.daily_budget_usd)}})
+    return {"success": True, "daily_budget_usd": body.daily_budget_usd}
+
+
+@api_router.get("/wallet/today")
+async def wallet_today(user: dict = Depends(require_premium)):
+    budget = float(user.get("daily_budget_usd") or 80.0)
+    today = today_str()
+    expenses = await db.expenses.find({"user_id": user["id"], "day": today},
+                                      {"_id": 0}).sort("created_at", -1).to_list(200)
+    spent = round(sum(float(e["amount_usd"]) for e in expenses), 2)
+    remaining = round(budget - spent, 2)
+    by_cat: dict = {}
+    for e in expenses:
+        by_cat[e["category"]] = round(by_cat.get(e["category"], 0.0) + float(e["amount_usd"]), 2)
+    return {
+        "day": today, "daily_budget_usd": budget,
+        "spent_usd": spent, "remaining_usd": remaining,
+        "percent_used": round((spent / budget * 100) if budget else 0, 1),
+        "expenses": expenses, "by_category": by_cat,
+    }
+
+
+@api_router.post("/wallet/expenses")
+async def add_expense(body: ExpenseCreate, user: dict = Depends(require_premium)):
+    if body.amount_usd <= 0 or body.amount_usd > 100000:
+        raise HTTPException(400, "Invalid amount")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "amount_usd": round(float(body.amount_usd), 2),
+        "category": body.category,
+        "note": (body.note or "").strip(),
+        "city": body.city or user.get("current_city"),
+        "day": today_str(),
+        "created_at": now_iso(),
+    }
+    await db.expenses.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.delete("/wallet/expenses/{expense_id}")
+async def delete_expense(expense_id: str, user: dict = Depends(require_premium)):
+    res = await db.expenses.delete_one({"id": expense_id, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Expense not found")
+    return {"success": True}
+
+
+@api_router.get("/wallet/history")
+async def wallet_history(days: int = 7, user: dict = Depends(require_premium)):
+    days = max(1, min(30, days))
+    budget = float(user.get("daily_budget_usd") or 80.0)
+    result = []
+    today = datetime.now(timezone.utc).date()
+    for i in range(days):
+        d = (today - timedelta(days=i)).isoformat()
+        rows = await db.expenses.find({"user_id": user["id"], "day": d}, {"_id": 0}).to_list(500)
+        spent = round(sum(float(r["amount_usd"]) for r in rows), 2)
+        result.append({"day": d, "spent_usd": spent, "budget_usd": budget,
+                       "over": spent > budget, "count": len(rows)})
+    return {"history": result, "daily_budget_usd": budget}
+
 
 
 # ============================================================================

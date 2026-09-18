@@ -23,6 +23,7 @@ export default function Discover() {
   const { user, refresh } = useAuth();
   const [city, setCity] = useState(user?.current_city && CITIES.includes(user.current_city) ? user.current_city : "Paris");
   const [hotspots, setHotspots] = useState<any[]>([]);
+  const [wallet, setWallet] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -31,8 +32,12 @@ export default function Discover() {
     try {
       const coords = CITY_COORDS[c];
       await api.checkin({ city: c, country: coords.country, lat: coords.lat, lng: coords.lng });
-      const res: any = await api.hotspots({ city: c, lat: coords.lat, lng: coords.lng });
-      setHotspots(res.hotspots || []);
+      const [res, w] = await Promise.all([
+        api.hotspots({ city: c, lat: coords.lat, lng: coords.lng }),
+        api.walletToday().catch(() => null),
+      ]);
+      setHotspots((res as any).hotspots || []);
+      setWallet(w);
       refresh();
     } catch (e) {
       setHotspots([]);
@@ -74,6 +79,33 @@ export default function Discover() {
             </Pressable>
           ))}
         </ScrollView>
+
+        <Pressable
+          testID="discover-wallet-card"
+          style={styles.walletCard}
+          onPress={() => router.push("/wallet")}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={styles.walletLabel}>TRIP WALLET · TODAY</Text>
+            <Text style={[
+              styles.walletValue,
+              wallet?.remaining_usd != null && wallet.remaining_usd < 0 && { color: colors.error },
+            ]}>
+              ${(wallet?.remaining_usd ?? wallet?.daily_budget_usd ?? user?.daily_budget_usd ?? 80).toFixed(2)}
+            </Text>
+            <Text style={styles.walletSub}>
+              {wallet ? `Spent $${wallet.spent_usd.toFixed(2)} of $${wallet.daily_budget_usd.toFixed(0)}` : "Set a daily budget to start"}
+            </Text>
+            <View style={styles.walletTrack}>
+              <View style={[
+                styles.walletFill,
+                { width: `${Math.min(100, wallet?.percent_used ?? 0)}%` },
+                wallet?.remaining_usd != null && wallet.remaining_usd < 0 && { backgroundColor: colors.error },
+              ]} />
+            </View>
+          </View>
+          <Text style={styles.walletArrow}>→</Text>
+        </Pressable>
 
         {loading ? (
           <ActivityIndicator color={colors.brandPrimary} style={{ marginTop: spacing["2xl"] }} />
@@ -153,6 +185,18 @@ const styles = StyleSheet.create({
   chipText: { color: colors.onSurfaceSecondary, fontSize: 13, fontWeight: "600" },
   chipTextActive: { color: colors.onBrandPrimary },
   empty: { color: colors.muted, textAlign: "center", marginTop: spacing["2xl"] },
+  walletCard: {
+    marginHorizontal: spacing.xl, marginTop: spacing.md, marginBottom: spacing.sm,
+    backgroundColor: colors.brandTertiary, borderRadius: radius.lg,
+    borderWidth: 1, borderColor: colors.brandPrimary,
+    padding: spacing.lg, flexDirection: "row", alignItems: "center", gap: spacing.md,
+  },
+  walletLabel: { color: colors.brandPrimary, fontSize: 10, letterSpacing: 2, fontWeight: "700" },
+  walletValue: { fontFamily: fonts.display, color: colors.onSurface, fontSize: 32, marginTop: 2 },
+  walletSub: { color: colors.muted, fontSize: 11, marginTop: 2 },
+  walletTrack: { height: 4, borderRadius: 2, backgroundColor: colors.surfaceTertiary, marginTop: spacing.sm, overflow: "hidden" },
+  walletFill: { height: 4, backgroundColor: colors.brandPrimary, borderRadius: 2 },
+  walletArrow: { color: colors.brandPrimary, fontSize: 24 },
   list: { paddingHorizontal: spacing.xl, gap: spacing.lg, marginTop: spacing.md },
   card: { borderRadius: radius.lg, overflow: "hidden" },
   cardImg: { width: "100%", height: 340, justifyContent: "space-between", padding: spacing.lg },

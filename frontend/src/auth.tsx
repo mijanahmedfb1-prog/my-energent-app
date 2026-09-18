@@ -12,6 +12,7 @@ export type User = {
   subscription_tier?: string | null;
   subscription_expires_at?: string | null;
   current_city?: string | null;
+  daily_budget_usd?: number;
 };
 
 type Ctx = {
