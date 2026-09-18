@@ -9,30 +9,34 @@ import { useRouter } from "expo-router";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
-import { requestAndGetLocation, openLocationSettings, SUPPORTED_CITIES } from "@/src/location";
+import { requestAndGetLocation, openLocationSettings, SUPPORTED_CITIES, isSeededCity } from "@/src/location";
 
-const CITIES = ["Paris", "Tokyo", "Bali", "Barcelona"];
+const SEEDED_CITIES = ["Paris", "Tokyo", "Bali", "Barcelona"];
 const CITY_COORDS = SUPPORTED_CITIES;
 
 export default function Discover() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { user, refresh } = useAuth();
-  const [city, setCity] = useState(user?.current_city && CITIES.includes(user.current_city) ? user.current_city : "Paris");
+  const [city, setCity] = useState<string>(user?.current_city && SEEDED_CITIES.includes(user.current_city) ? user.current_city : "Paris");
+  const [country, setCountry] = useState<string>("");
+  const [isAi, setIsAi] = useState(false); // true when spots came from AI discover
+  const [aiSource, setAiSource] = useState<string | null>(null);
   const [hotspots, setHotspots] = useState<any[]>([]);
   const [wallet, setWallet] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [locBusy, setLocBusy] = useState(false);
   const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null);
-  const [nearKm, setNearKm] = useState<number | null>(null);
   const [locError, setLocError] = useState<string | null>(null);
   const [blocked, setBlocked] = useState(false);
 
-  const load = useCallback(async (c: string, coordsOverride?: { lat: number; lng: number }) => {
-    setLoading(true);
+  // Load spots for a seeded city (or user-picked chip)
+  const loadSeededCity = useCallback(async (c: string, coordsOverride?: { lat: number; lng: number }) => {
+    setLoading(true); setIsAi(false); setAiSource(null);
     try {
       const cityCoords = CITY_COORDS[c];
+      if (!cityCoords) throw new Error("Unknown city");
       const useCoords = coordsOverride || cityCoords;
       await api.checkin({ city: c, country: cityCoords.country, lat: useCoords.lat, lng: useCoords.lng });
       const [res, w] = await Promise.all([
@@ -40,10 +44,35 @@ export default function Discover() {
         api.walletToday().catch(() => null),
       ]);
       setHotspots((res as any).hotspots || []);
+      setCountry(cityCoords.country);
       setWallet(w);
       refresh();
-    } catch (e) {
+    } catch {
       setHotspots([]);
+    } finally { setLoading(false); }
+  }, [refresh]);
+
+  // Discover AI spots for an arbitrary detected city
+  const loadDiscoveredCity = useCallback(async (detectedCity: string, detectedCountry: string,
+                                                coords: { lat: number; lng: number },
+                                                forceRefresh = false) => {
+    setLoading(true); setIsAi(true);
+    try {
+      await api.checkin({ city: detectedCity, country: detectedCountry || "Unknown",
+                         lat: coords.lat, lng: coords.lng });
+      const [res, w] = await Promise.all([
+        api.discoverHotspots({ lat: coords.lat, lng: coords.lng,
+                               city: detectedCity, country: detectedCountry,
+                               force_refresh: forceRefresh }),
+        api.walletToday().catch(() => null),
+      ]);
+      setHotspots((res as any).hotspots || []);
+      setAiSource((res as any).source || null);
+      setWallet(w);
+      refresh();
+    } catch (e: any) {
+      setHotspots([]);
+      setLocError(e?.message || "Couldn't discover spots for this city");
     } finally { setLoading(false); }
   }, [refresh]);
 
@@ -51,13 +80,42 @@ export default function Discover() {
   useEffect(() => {
     (async () => {
       const raw = await AsyncStorage.getItem("gt_gps");
-      if (raw) { try { setGps(JSON.parse(raw)); } catch {} }
+      const savedCity = await AsyncStorage.getItem("gt_gps_city");
+      const savedCountry = await AsyncStorage.getItem("gt_gps_country");
+      if (raw) {
+        try {
+          const coords = JSON.parse(raw);
+          setGps(coords);
+          if (savedCity) {
+            setCity(savedCity);
+            setCountry(savedCountry || "");
+            if (isSeededCity(savedCity)) {
+              loadSeededCity(savedCity, coords);
+            } else {
+              loadDiscoveredCity(savedCity, savedCountry || "", coords, false);
+            }
+            return;
+          }
+        } catch {}
+      }
+      loadSeededCity(city);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => { load(city, gps || undefined); }, [city]);
+  const pickChip = (c: string) => {
+    setCity(c); setCountry(CITY_COORDS[c]?.country || "");
+    setGps(null); setLocError(null);
+    AsyncStorage.multiRemove(["gt_gps", "gt_gps_city", "gt_gps_country"]);
+    loadSeededCity(c);
+  };
 
-  const onRefresh = async () => { setRefreshing(true); await load(city, gps || undefined); setRefreshing(false); };
+  const onRefresh = async () => {
+    setRefreshing(true);
+    if (isAi && gps) await loadDiscoveredCity(city, country, gps, true);
+    else await loadSeededCity(city, gps || undefined);
+    setRefreshing(false);
+  };
 
   const useMyLocation = async () => {
     setLocBusy(true); setLocError(null); setBlocked(false);
@@ -65,11 +123,17 @@ export default function Discover() {
     setLocBusy(false);
     if (r.status === "granted") {
       setGps(r.coords);
-      setNearKm(r.nearestDistanceKm);
-      await AsyncStorage.setItem("gt_gps", JSON.stringify(r.coords));
-      await AsyncStorage.setItem("gt_gps_city", r.city);
-      if (r.city !== city) setCity(r.city);
-      else load(r.city, r.coords);
+      setCity(r.city); setCountry(r.country);
+      await AsyncStorage.multiSet([
+        ["gt_gps", JSON.stringify(r.coords)],
+        ["gt_gps_city", r.city],
+        ["gt_gps_country", r.country],
+      ]);
+      if (isSeededCity(r.city)) {
+        loadSeededCity(r.city, r.coords);
+      } else {
+        loadDiscoveredCity(r.city, r.country, r.coords, false);
+      }
     } else if (r.status === "denied") {
       setBlocked(!r.canAskAgain);
       setLocError(r.message);
@@ -114,10 +178,11 @@ export default function Discover() {
             <Pressable
               testID="discover-clear-location"
               onPress={async () => {
-                setGps(null); setNearKm(null); setLocError(null);
-                await AsyncStorage.removeItem("gt_gps");
-                await AsyncStorage.removeItem("gt_gps_city");
-                load(city);
+                setGps(null); setLocError(null);
+                await AsyncStorage.multiRemove(["gt_gps", "gt_gps_city", "gt_gps_country"]);
+                const fallback = SEEDED_CITIES.includes(city) ? city : "Paris";
+                setCity(fallback);
+                loadSeededCity(fallback);
               }}
             >
               <Text style={styles.clearLoc}>Clear</Text>
@@ -126,9 +191,10 @@ export default function Discover() {
         </View>
         {locError ? (
           <Text style={styles.locError} testID="discover-loc-error">{locError}</Text>
-        ) : nearKm != null && nearKm > 200 ? (
-          <Text style={styles.locHint}>
-            Nearest supported city is {city} · ~{nearKm} km away.
+        ) : gps && isAi ? (
+          <Text style={styles.locHint} testID="discover-ai-hint">
+            ✦  AI-discovered spots for {city}{country ? `, ${country}` : ""}
+            {aiSource === "cache" ? " · cached" : aiSource === "ai" ? " · fresh" : ""}
           </Text>
         ) : null}
 
@@ -136,13 +202,19 @@ export default function Discover() {
           contentContainerStyle={styles.chipRow}
           style={{ maxHeight: 56 }}
         >
-          {CITIES.map((c) => (
+          {/* Detected non-seeded city gets its own chip when GPS is on */}
+          {gps && !isSeededCity(city) ? (
+            <View style={[styles.chip, styles.chipActive]} testID="discover-detected-chip">
+              <Text style={[styles.chipText, styles.chipTextActive]}>◉  {city}</Text>
+            </View>
+          ) : null}
+          {SEEDED_CITIES.map((c) => (
             <Pressable
-              key={c} onPress={() => setCity(c)}
+              key={c} onPress={() => pickChip(c)}
               testID={`discover-city-${c.toLowerCase()}`}
-              style={[styles.chip, city === c && styles.chipActive]}
+              style={[styles.chip, city === c && !isAi && styles.chipActive]}
             >
-              <Text style={[styles.chipText, city === c && styles.chipTextActive]}>{c}</Text>
+              <Text style={[styles.chipText, city === c && !isAi && styles.chipTextActive]}>{c}</Text>
             </Pressable>
           ))}
         </ScrollView>
@@ -175,9 +247,18 @@ export default function Discover() {
         </Pressable>
 
         {loading ? (
-          <ActivityIndicator color={colors.brandPrimary} style={{ marginTop: spacing["2xl"] }} />
+          <View style={{ marginTop: spacing["2xl"], alignItems: "center", gap: spacing.sm }}>
+            <ActivityIndicator color={colors.brandPrimary} />
+            {isAi ? (
+              <Text style={styles.loadingText} testID="discover-loading-ai">
+                Discovering the best of {city} for you…
+              </Text>
+            ) : null}
+          </View>
         ) : hotspots.length === 0 ? (
-          <Text style={styles.empty}>No hotspots for {city}. Pull to refresh.</Text>
+          <Text style={styles.empty} testID="discover-empty">
+            No spots found for {city}. Pull to refresh.
+          </Text>
         ) : (
           <View style={styles.list}>
             {hotspots.map((h) => (
@@ -252,7 +333,8 @@ const styles = StyleSheet.create({
   locBtnTextActive: { color: colors.brandPrimary },
   clearLoc: { color: colors.muted, fontSize: 12, textDecorationLine: "underline" },
   locError: { color: colors.error, fontSize: 11, paddingHorizontal: spacing.xl, marginTop: 6 },
-  locHint: { color: colors.muted, fontSize: 11, paddingHorizontal: spacing.xl, marginTop: 6 },
+  locHint: { color: colors.brandPrimary, fontSize: 11, paddingHorizontal: spacing.xl, marginTop: 6, fontWeight: "600" },
+  loadingText: { color: colors.muted, fontSize: 12 },
   chipRow: { gap: spacing.sm, paddingHorizontal: spacing.xl, paddingVertical: spacing.sm },
   chip: {
     height: 36, paddingHorizontal: spacing.lg, borderRadius: radius.pill,

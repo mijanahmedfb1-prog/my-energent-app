@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import json
 import logging
 import jwt
 import bcrypt
@@ -132,6 +133,14 @@ class ExpenseCreate(BaseModel):
     category: Literal["food", "transit", "entry", "activity", "shopping", "lodging", "other"]
     note: Optional[str] = None
     city: Optional[str] = None
+
+
+class DiscoverReq(BaseModel):
+    lat: float
+    lng: float
+    city: Optional[str] = None
+    country: Optional[str] = None
+    force_refresh: bool = False
 
 
 
@@ -318,6 +327,208 @@ async def list_cities(user: dict = Depends(require_premium)):
         doc = await db.hotspots.find_one({"city": c}, {"_id": 0})
         result.append({"city": c, "country": doc["country"], "cover_image": doc["image_url"]})
     return {"cities": result}
+
+
+# ---------------------------------------------------------------------------
+# AI Discover: generate top hotspots for ANY city using Claude + Wikipedia images
+# ---------------------------------------------------------------------------
+
+import httpx
+import re
+import urllib.parse as _urlparse
+
+DISCOVER_TTL_DAYS = 14
+
+FALLBACK_IMAGES = [
+    "https://images.unsplash.com/photo-1500835556837-99ac94a94552?w=800",  # travel skyline
+    "https://images.unsplash.com/photo-1476514525535-07fb3b4ae5f1?w=800",  # street
+    "https://images.unsplash.com/photo-1502920917128-1aa500764cbd?w=800",  # temple
+    "https://images.unsplash.com/photo-1506929562872-bb421503ef21?w=800",  # market
+    "https://images.unsplash.com/photo-1519681393784-d120267933ba?w=800",  # mountain
+    "https://images.unsplash.com/photo-1512453979798-5ea266f8880c?w=800",  # cafe
+]
+
+
+def _clean_place(name: str) -> str:
+    # Drop text in parens and trim junk punctuation
+    n = re.sub(r"\s*\([^)]*\)\s*", " ", name).strip()
+    n = re.sub(r"\s+", " ", n)
+    return n
+
+
+WIKI_UA = "GuardTrip/1.0 (https://guardtrip.app; support@guardtrip.app) httpx"
+
+
+async def _wiki_summary_image(client: httpx.AsyncClient, title: str) -> Optional[str]:
+    try:
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{_urlparse.quote(title.replace(' ', '_'))}"
+        r = await client.get(url, headers={"User-Agent": WIKI_UA, "Accept": "application/json"})
+        if r.status_code == 200:
+            data = r.json()
+            orig = (data.get("originalimage") or {}).get("source")
+            thumb = (data.get("thumbnail") or {}).get("source")
+            return orig or thumb
+    except Exception:
+        pass
+    return None
+
+
+async def _wiki_opensearch(client: httpx.AsyncClient, query: str) -> Optional[str]:
+    try:
+        url = ("https://en.wikipedia.org/w/api.php?action=opensearch&limit=1&namespace=0&format=json&search="
+               + _urlparse.quote(query))
+        r = await client.get(url, headers={"User-Agent": WIKI_UA, "Accept": "application/json"})
+        if r.status_code == 200:
+            data = r.json()
+            titles = data[1] if isinstance(data, list) and len(data) > 1 else []
+            if titles:
+                return titles[0]
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_place_image(place: str, city: str, idx: int) -> str:
+    clean = _clean_place(place)
+    async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+        # 1) direct summary
+        img = await _wiki_summary_image(client, clean)
+        if img:
+            return img
+        # 2) opensearch → best-matching title → summary
+        title = await _wiki_opensearch(client, f"{clean} {city}")
+        if title:
+            img = await _wiki_summary_image(client, title)
+            if img:
+                return img
+        # 3) opensearch on just the name
+        title = await _wiki_opensearch(client, clean)
+        if title:
+            img = await _wiki_summary_image(client, title)
+            if img:
+                return img
+    return FALLBACK_IMAGES[idx % len(FALLBACK_IMAGES)]
+
+
+def _extract_json_array(text: str):
+    """Extract a JSON array from the model reply even when wrapped in prose or code fences."""
+    m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", text)
+    if m:
+        chunk = m.group(1)
+    else:
+        i = text.find("[")
+        j = text.rfind("]")
+        chunk = text[i:j + 1] if i != -1 and j != -1 and j > i else text
+    return json.loads(chunk)
+
+
+async def _generate_ai_hotspots(city: str, country: str, lat: float, lng: float) -> list:
+    system = (
+        "You are a highly-specific local travel expert. When asked for spots, respond with ONLY "
+        "a valid JSON array (no prose, no markdown fences, no commentary). Do NOT invent places; "
+        "prefer well-known, publicly documented landmarks and popular local experiences."
+    )
+    user_prompt = (
+        f"I'm a solo international traveler currently in {city}"
+        + (f", {country}" if country else "")
+        + f" near coordinates ({lat:.4f}, {lng:.4f}). "
+        "Give me 6 must-visit spots for the next 2 days. Return a JSON array where each element is: "
+        "{name: string (well-known landmark or district name), "
+        "description: string (one crisp sentence), "
+        "lat: number, lng: number, "
+        "entry_fee_local: string (in local currency, or 'Free'), "
+        "entry_fee_foreigner_usd: number, "
+        "transit_cost_usd: number, transit_time_min: integer, "
+        "activities: array of {name: string, cost_usd: number} (2-3 items), "
+        "rating: number between 4.0 and 4.9, "
+        "tags: array of 2-3 lowercase words}. "
+        "Coordinates must be plausible for the city; costs in USD unless noted. Return ONLY the JSON array."
+    )
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"discover-{city}-{country}",
+        system_message=system,
+    ).with_model("anthropic", "claude-sonnet-4-6")
+    reply = await chat.send_message(UserMessage(text=user_prompt))
+    text = reply if isinstance(reply, str) else str(reply)
+    return _extract_json_array(text)
+
+
+@api_router.post("/hotspots/discover")
+async def discover_hotspots(body: DiscoverReq, user: dict = Depends(require_premium)):
+    if not body.city:
+        raise HTTPException(400, "city is required")
+    city = body.city.strip()
+    country = (body.country or "").strip()
+    cache_key = f"ai:{city.lower()}:{country.lower()}"
+
+    # Return cached spots if fresh
+    if not body.force_refresh:
+        cached = await db.hotspots.find({"cache_key": cache_key}, {"_id": 0}).to_list(50)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=DISCOVER_TTL_DAYS)
+        fresh = [c for c in cached if datetime.fromisoformat(c.get("cached_at", now_iso())) > cutoff]
+        if len(fresh) >= 4:
+            for d in fresh:
+                d["distance_km"] = round(haversine_km(body.lat, body.lng, d["lat"], d["lng"]), 2)
+            fresh.sort(key=lambda d: d.get("distance_km", 1e9))
+            return {"city": city, "country": country, "source": "cache", "hotspots": fresh}
+
+    # Otherwise generate with AI
+    try:
+        raw_spots = await _generate_ai_hotspots(city, country, body.lat, body.lng)
+    except Exception as e:
+        logging.exception("AI discover failed")
+        raise HTTPException(502, f"Couldn't generate spots: {e}")
+
+    if not isinstance(raw_spots, list) or len(raw_spots) == 0:
+        raise HTTPException(502, "AI returned no spots")
+
+    # Delete stale cached entries for this key first
+    await db.hotspots.delete_many({"cache_key": cache_key})
+
+    # Fetch images in parallel to keep response snappy
+    candidates = [s for s in raw_spots[:8] if str(s.get("name", "")).strip()]
+    image_urls = await asyncio.gather(*[
+        _fetch_place_image(str(s["name"]).strip(), city, i) for i, s in enumerate(candidates)
+    ])
+
+    saved = []
+    for i, s in enumerate(candidates):
+        name = str(s.get("name", "")).strip()
+        image_url = image_urls[i]
+        doc = {
+            "id": str(uuid.uuid4()),
+            "city": city,
+            "country": country or "Unknown",
+            "name": name,
+            "description": str(s.get("description", "")).strip()[:280],
+            "image_url": image_url,
+            "lat": float(s.get("lat") or body.lat),
+            "lng": float(s.get("lng") or body.lng),
+            "entry_fee_local": str(s.get("entry_fee_local", "Free")),
+            "entry_fee_usd": float(s.get("entry_fee_foreigner_usd", 0) or 0),
+            "entry_fee_foreigner_usd": float(s.get("entry_fee_foreigner_usd", 0) or 0),
+            "transit_cost_usd": float(s.get("transit_cost_usd", 0) or 0),
+            "transit_time_min": int(s.get("transit_time_min", 15) or 15),
+            "activities": [
+                {"name": str(a.get("name", "")), "cost_usd": float(a.get("cost_usd", 0) or 0)}
+                for a in (s.get("activities") or []) if isinstance(a, dict)
+            ],
+            "rating": float(s.get("rating", 4.5) or 4.5),
+            "tags": [str(t).lower() for t in (s.get("tags") or [])][:4],
+            "source": "ai",
+            "cache_key": cache_key,
+            "cached_at": now_iso(),
+        }
+        await db.hotspots.insert_one(doc)
+        doc.pop("_id", None)
+        doc["distance_km"] = round(haversine_km(body.lat, body.lng, doc["lat"], doc["lng"]), 2)
+        saved.append(doc)
+
+    saved.sort(key=lambda d: d.get("distance_km", 1e9))
+    return {"city": city, "country": country, "source": "ai", "hotspots": saved}
+
+
 
 
 # ============================================================================

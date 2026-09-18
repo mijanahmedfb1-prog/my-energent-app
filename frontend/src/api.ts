@@ -76,4 +76,7 @@ export const api = {
   deleteExpense: (id: string) => request(`/wallet/expenses/${id}`, { method: "DELETE" }),
   setBudget: (daily_budget_usd: number) =>
     request("/wallet/budget", { method: "POST", body: JSON.stringify({ daily_budget_usd }) }),
+
+  discoverHotspots: (b: { lat: number; lng: number; city: string; country?: string; force_refresh?: boolean }) =>
+    request("/hotspots/discover", { method: "POST", body: JSON.stringify(b) }),
 };

@@ -3,6 +3,7 @@ import * as Location from "expo-location";
 
 export type Coords = { lat: number; lng: number };
 
+// Kept only for legacy fallback distance computation
 export const SUPPORTED_CITIES: Record<string, { lat: number; lng: number; country: string }> = {
   Paris: { lat: 48.8566, lng: 2.3522, country: "France" },
   Tokyo: { lat: 35.6762, lng: 139.6503, country: "Japan" },
@@ -20,47 +21,59 @@ function haversineKm(a: Coords, b: Coords): number {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-export function nearestSupportedCity(coords: Coords): {
-  city: string; country: string; distance_km: number;
-} {
-  let best = { city: "Paris", country: "France", distance_km: Number.POSITIVE_INFINITY };
-  for (const [city, c] of Object.entries(SUPPORTED_CITIES)) {
-    const d = haversineKm(coords, c);
-    if (d < best.distance_km) best = { city, country: c.country, distance_km: d };
-  }
-  return { ...best, distance_km: Math.round(best.distance_km) };
+async function reverseGeocode(coords: Coords): Promise<{ city: string; country: string }> {
+  try {
+    if (Platform.OS !== "web") {
+      const res = await Location.reverseGeocodeAsync(coords);
+      const r: any = res && res[0];
+      if (r) {
+        const city = r.city || r.subregion || r.region || r.district || "Unknown";
+        const country = r.country || "";
+        return { city, country };
+      }
+    } else {
+      // Use OpenStreetMap Nominatim (no key required, small rate limits fine for MVP)
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${coords.lat}&lon=${coords.lng}&zoom=10`;
+      const r = await fetch(url, { headers: { "Accept-Language": "en" } });
+      if (r.ok) {
+        const data = await r.json();
+        const a = data.address || {};
+        const city = a.city || a.town || a.village || a.municipality || a.county || data.name || "Unknown";
+        const country = a.country || "";
+        return { city, country };
+      }
+    }
+  } catch {}
+  return { city: "Unknown", country: "" };
 }
 
 export type LocationResult =
-  | { status: "granted"; coords: Coords; city: string; country: string; nearestDistanceKm: number }
+  | {
+      status: "granted";
+      coords: Coords;
+      city: string;
+      country: string;
+    }
   | { status: "denied"; canAskAgain: boolean; message: string }
   | { status: "error"; message: string };
 
 export async function requestAndGetLocation(): Promise<LocationResult> {
   try {
-    // Web fallback via navigator.geolocation (expo-location supports web but permissions API varies)
     if (Platform.OS === "web") {
       if (!("geolocation" in navigator)) {
         return { status: "error", message: "Geolocation not supported in this browser." };
       }
-      return await new Promise<LocationResult>((resolve) => {
+      const coords: Coords = await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-            const near = nearestSupportedCity(coords);
-            resolve({
-              status: "granted", coords,
-              city: near.city, country: near.country,
-              nearestDistanceKm: near.distance_km,
-            });
-          },
-          (err) => resolve({
-            status: "denied", canAskAgain: false,
-            message: err.message || "Location permission denied.",
-          }),
+          (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+          (err) => reject(err),
           { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 },
         );
+      }).catch((err) => {
+        throw new Error(err?.message || "Location permission denied.");
       });
+      const geo = await reverseGeocode(coords);
+      return { status: "granted", coords, city: geo.city, country: geo.country };
     }
 
     let perm = await Location.getForegroundPermissionsAsync();
@@ -83,13 +96,12 @@ export async function requestAndGetLocation(): Promise<LocationResult> {
     }
     const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
     const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-    const near = nearestSupportedCity(coords);
-    return {
-      status: "granted", coords,
-      city: near.city, country: near.country,
-      nearestDistanceKm: near.distance_km,
-    };
+    const geo = await reverseGeocode(coords);
+    return { status: "granted", coords, city: geo.city, country: geo.country };
   } catch (e: any) {
+    if (String(e?.message || "").toLowerCase().includes("denied")) {
+      return { status: "denied", canAskAgain: false, message: e.message };
+    }
     return { status: "error", message: e?.message || "Failed to get location." };
   }
 }
@@ -97,3 +109,11 @@ export async function requestAndGetLocation(): Promise<LocationResult> {
 export function openLocationSettings() {
   Linking.openSettings().catch(() => {});
 }
+
+export function isSeededCity(city: string): boolean {
+  return Object.keys(SUPPORTED_CITIES).some(
+    (c) => c.toLowerCase() === (city || "").toLowerCase(),
+  );
+}
+
+export { haversineKm };
