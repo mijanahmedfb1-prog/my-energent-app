@@ -9,14 +9,18 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.aitravelshield.f71uze"
+      "bundleIdentifier": "com.emergent.aitravelshield.f71uze",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "GuardTrip uses your location to show nearby hotspots and safety alerts."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#000000"
       },
-      "package": "com.emergent.aitravelshield.f71uze"
+      "package": "com.emergent.aitravelshield.f71uze",
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
     },
     "web": {
       "bundler": "metro",
@@ -38,7 +42,13 @@
       "expo-image",
       "expo-secure-store",
       "expo-web-browser",
-      "expo-status-bar"
+      "expo-status-bar",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "GuardTrip uses your location to show nearby hotspots and safety alerts."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

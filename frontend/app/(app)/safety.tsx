@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, RefreshControl,
   TextInput, KeyboardAvoidingView, Platform, Modal,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import { api } from "@/src/api";
@@ -33,16 +34,26 @@ export default function Safety() {
   const [rTitle, setRTitle] = useState("");
   const [rDesc, setRDesc] = useState("");
   const [rSubmitting, setRSubmitting] = useState(false);
+  const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const raw = await AsyncStorage.getItem("gt_gps");
+      if (raw) { try { setGps(JSON.parse(raw)); } catch {} }
+    })();
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [lat, lng] = CITY_COORDS[city] || [0, 0];
+      const [defLat, defLng] = CITY_COORDS[city] || [0, 0];
+      const lat = gps?.lat ?? defLat;
+      const lng = gps?.lng ?? defLng;
       const res: any = await api.alerts({ city, lat, lng });
       setAlerts(res.alerts || []);
     } catch { setAlerts([]); }
     finally { setLoading(false); }
-  }, [city]);
+  }, [city, gps]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -50,7 +61,9 @@ export default function Safety() {
     if (!rTitle.trim()) return;
     setRSubmitting(true);
     try {
-      const [lat, lng] = CITY_COORDS[city];
+      const [defLat, defLng] = CITY_COORDS[city];
+      const lat = gps?.lat ?? defLat;
+      const lng = gps?.lng ?? defLng;
       await api.createAlert({
         kind: rKind, title: rTitle.trim(),
         description: rDesc.trim() || "Community report", city, lat, lng,

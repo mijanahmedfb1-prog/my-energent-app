@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput, KeyboardAvoidingView,
   Platform, ActivityIndicator,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import { api } from "@/src/api";
@@ -19,10 +20,13 @@ export default function Assistant() {
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null);
   const scrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
     (async () => {
+      const raw = await AsyncStorage.getItem("gt_gps");
+      if (raw) { try { setGps(JSON.parse(raw)); } catch {} }
       try {
         const res: any = await api.aiHistory();
         if (res.messages?.length) setMessages(res.messages.map((m: any) => ({ role: m.role, content: m.content })));
@@ -44,7 +48,7 @@ export default function Assistant() {
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
     try {
       const city = user?.current_city || "Paris";
-      const coords = CITY_COORDS[city] || CITY_COORDS.Paris;
+      const coords = gps || CITY_COORDS[city] || CITY_COORDS.Paris;
       const res: any = await api.aiChat({ message: text, city, lat: coords.lat, lng: coords.lng });
       setMessages([...newMsgs, { role: "assistant", content: res.reply }]);
     } catch (e: any) {

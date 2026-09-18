@@ -2,20 +2,17 @@ import { useEffect, useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, RefreshControl, ImageBackground,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { requestAndGetLocation, openLocationSettings, SUPPORTED_CITIES } from "@/src/location";
 
 const CITIES = ["Paris", "Tokyo", "Bali", "Barcelona"];
-const CITY_COORDS: Record<string, { lat: number; lng: number; country: string }> = {
-  Paris: { lat: 48.8566, lng: 2.3522, country: "France" },
-  Tokyo: { lat: 35.6762, lng: 139.6503, country: "Japan" },
-  Bali: { lat: -8.3405, lng: 115.0920, country: "Indonesia" },
-  Barcelona: { lat: 41.3851, lng: 2.1734, country: "Spain" },
-};
+const CITY_COORDS = SUPPORTED_CITIES;
 
 export default function Discover() {
   const router = useRouter();
@@ -26,14 +23,20 @@ export default function Discover() {
   const [wallet, setWallet] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [locBusy, setLocBusy] = useState(false);
+  const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null);
+  const [nearKm, setNearKm] = useState<number | null>(null);
+  const [locError, setLocError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState(false);
 
-  const load = useCallback(async (c: string) => {
+  const load = useCallback(async (c: string, coordsOverride?: { lat: number; lng: number }) => {
     setLoading(true);
     try {
-      const coords = CITY_COORDS[c];
-      await api.checkin({ city: c, country: coords.country, lat: coords.lat, lng: coords.lng });
+      const cityCoords = CITY_COORDS[c];
+      const useCoords = coordsOverride || cityCoords;
+      await api.checkin({ city: c, country: cityCoords.country, lat: useCoords.lat, lng: useCoords.lng });
       const [res, w] = await Promise.all([
-        api.hotspots({ city: c, lat: coords.lat, lng: coords.lng }),
+        api.hotspots({ city: c, lat: useCoords.lat, lng: useCoords.lng }),
         api.walletToday().catch(() => null),
       ]);
       setHotspots((res as any).hotspots || []);
@@ -44,9 +47,36 @@ export default function Discover() {
     } finally { setLoading(false); }
   }, [refresh]);
 
-  useEffect(() => { load(city); }, [city]);
+  // Rehydrate last GPS from storage
+  useEffect(() => {
+    (async () => {
+      const raw = await AsyncStorage.getItem("gt_gps");
+      if (raw) { try { setGps(JSON.parse(raw)); } catch {} }
+    })();
+  }, []);
 
-  const onRefresh = async () => { setRefreshing(true); await load(city); setRefreshing(false); };
+  useEffect(() => { load(city, gps || undefined); }, [city]);
+
+  const onRefresh = async () => { setRefreshing(true); await load(city, gps || undefined); setRefreshing(false); };
+
+  const useMyLocation = async () => {
+    setLocBusy(true); setLocError(null); setBlocked(false);
+    const r = await requestAndGetLocation();
+    setLocBusy(false);
+    if (r.status === "granted") {
+      setGps(r.coords);
+      setNearKm(r.nearestDistanceKm);
+      await AsyncStorage.setItem("gt_gps", JSON.stringify(r.coords));
+      await AsyncStorage.setItem("gt_gps_city", r.city);
+      if (r.city !== city) setCity(r.city);
+      else load(r.city, r.coords);
+    } else if (r.status === "denied") {
+      setBlocked(!r.canAskAgain);
+      setLocError(r.message);
+    } else {
+      setLocError(r.message);
+    }
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.surface }}>
@@ -64,6 +94,43 @@ export default function Discover() {
             <Text style={styles.avatarText}>{user?.display_name?.[0]?.toUpperCase() || "?"}</Text>
           </Pressable>
         </View>
+
+        <View style={styles.locRow}>
+          <Pressable
+            testID="discover-use-location"
+            style={[styles.locBtn, gps && styles.locBtnActive]}
+            onPress={blocked ? openLocationSettings : useMyLocation}
+            disabled={locBusy}
+          >
+            {locBusy ? (
+              <ActivityIndicator color={colors.brandPrimary} size="small" />
+            ) : (
+              <Text style={[styles.locBtnText, gps && styles.locBtnTextActive]}>
+                {blocked ? "◈  Open Settings" : gps ? `◉  Live GPS · ${city}` : "◉  Use my location"}
+              </Text>
+            )}
+          </Pressable>
+          {gps ? (
+            <Pressable
+              testID="discover-clear-location"
+              onPress={async () => {
+                setGps(null); setNearKm(null); setLocError(null);
+                await AsyncStorage.removeItem("gt_gps");
+                await AsyncStorage.removeItem("gt_gps_city");
+                load(city);
+              }}
+            >
+              <Text style={styles.clearLoc}>Clear</Text>
+            </Pressable>
+          ) : null}
+        </View>
+        {locError ? (
+          <Text style={styles.locError} testID="discover-loc-error">{locError}</Text>
+        ) : nearKm != null && nearKm > 200 ? (
+          <Text style={styles.locHint}>
+            Nearest supported city is {city} · ~{nearKm} km away.
+          </Text>
+        ) : null}
 
         <ScrollView horizontal showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipRow}
@@ -175,6 +242,17 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.brandPrimary, justifyContent: "center", alignItems: "center",
   },
   avatarText: { color: colors.brandPrimary, fontSize: 16, fontWeight: "700" },
+  locRow: { flexDirection: "row", alignItems: "center", gap: spacing.md,
+    paddingHorizontal: spacing.xl, marginTop: spacing.sm },
+  locBtn: { paddingHorizontal: spacing.lg, paddingVertical: 10, borderRadius: radius.pill,
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceSecondary,
+    minHeight: 38, justifyContent: "center" },
+  locBtnActive: { borderColor: colors.brandPrimary, backgroundColor: colors.brandTertiary },
+  locBtnText: { color: colors.onSurfaceSecondary, fontSize: 12, fontWeight: "600", letterSpacing: 0.3 },
+  locBtnTextActive: { color: colors.brandPrimary },
+  clearLoc: { color: colors.muted, fontSize: 12, textDecorationLine: "underline" },
+  locError: { color: colors.error, fontSize: 11, paddingHorizontal: spacing.xl, marginTop: 6 },
+  locHint: { color: colors.muted, fontSize: 11, paddingHorizontal: spacing.xl, marginTop: 6 },
   chipRow: { gap: spacing.sm, paddingHorizontal: spacing.xl, paddingVertical: spacing.sm },
   chip: {
     height: 36, paddingHorizontal: spacing.lg, borderRadius: radius.pill,
