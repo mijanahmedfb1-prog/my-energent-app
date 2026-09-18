@@ -1,0 +1,45 @@
+{
+  "summary": "Backend-only test pass for GuardTrip MVP against public preview URL. All 15 requested feature flows verified via pytest (16 test functions, 16 passed, 100%). Auth (register/login/me), 402 paywall, month subscription activation, hotspots (Paris x3 sorted by distance), 4 cities, partner check-in + female Paris filter (Sofia R. + Priya S.), 1-1 chat with read-receipt persistence, Claude Sonnet 4.6 AI concierge + history, alerts CRUD sorted by distance, offline pack with Bonjour phrase, and expense predict all pass. No mocked endpoints. No Expo/React Native issues in scope (backend only).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/chat/rooms/{room_id}/messages",
+        "issue": "Read-receipt update runs after the messages are already loaded, so the FIRST fetch by the receiver still returns 'delivered' status; the persistence is correct (subsequent fetches show 'read'). This is a minor UX inconsistency - clients relying on the first response to reflect self-read state will show stale status until next poll."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_guardtrip_backend.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Minor / optional) In GET /api/chat/rooms/{room_id}/messages, run the update_many BEFORE the find, or re-fetch after update, so the receiver's own fetch response already reflects status='read'. Current behavior is acceptable but slightly stale on the first poll."
+  ],
+  "critical_code_review_comments": [
+    "server.py is ~795 lines and mixes models, helpers, seed data, and all route groups in one module. Consider splitting into routers (auth, subs, hotspots, partners, chat, ai, alerts, offline) plus a seed.py — future maintainability.",
+    "Using @app.on_event('startup') is deprecated in FastAPI; migrate to lifespan context manager.",
+    "AI failure path (LlmChat exception) swallows the error and returns a canned reply with a 200 status. Consider logging the model/session used and optionally surfacing a specific error code so the client can distinguish transient LLM outage from a normal reply.",
+    "check_premium relies on datetime.fromisoformat parsing subscription_expires_at exactly - fine here since we always write isoformat, but a defensive try/except would prevent a corrupted record from 500-ing every /me call.",
+    "seed_db uses count_documents == 0 gates that are independent; if only partners were wiped they'd re-seed while hotspots/alerts wouldn't (fine now but noteworthy)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_guardtrip_backend.py",
+    "/app/backend/tests/conftest.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/iteration_1.json"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Test creates one fresh user each run (test_<uuid>@guardtrip.example.com / test1234), activates a month subscription, checks in to Paris, sends chat messages with seeded Sofia R., writes one 'TEST_' pickpocket alert in Paris, and calls Claude twice (ai/chat + expense/predict). No seed data is deleted at teardown; each run's user is unique so no collisions.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run backend tests with: `python -m pytest backend/tests/test_guardtrip_backend.py -v -n 0` (must pass -n 0 because pytest.ini defaults to xdist -n 2 --dist loadscope, and this suite shares a module-level STATE dict across classes which breaks under parallel workers). Uses EXPO_PUBLIC_BACKEND_URL from /app/frontend/.env. Fresh email is generated per run so no cleanup needed. Sofia R. seeded partner login (sofia@guardtrip.demo / demo1234) is used to send an inbound chat message and verify read-receipt persistence via a second GET.",
+  "rca_of_issue": "N/A — no unresolved issues. Only one minor observation about chat read-receipt timing documented above."
+}

@@ -1,0 +1,172 @@
+{
+  "app_name": "GuardTrip",
+  "personality": "6 Glass / Luxe DARK",
+  "personality_one_liner": "A cinematic, exclusive, and highly tactical dark-mode sanctuary that feels like an elite global concierge and bodyguard.",
+  "color": {
+    "surface": "#0A0A0A",
+    "onSurface": "#F5F5F5",
+    "surfaceSecondary": "#171717",
+    "onSurfaceSecondary": "#E5E5E0",
+    "surfaceTertiary": "#262626",
+    "onSurfaceTertiary": "#D4D4D4",
+    "surfaceInverse": "#F5F5F5",
+    "onSurfaceInverse": "#0A0A0A",
+    "brand": "#DCCBAF",
+    "brandPrimary": "#DCCBAF",
+    "onBrandPrimary": "#0A0A0A",
+    "brandSecondary": "#A6977D",
+    "onBrandSecondary": "#0A0A0A",
+    "brandTertiary": "#332B1E",
+    "onBrandTertiary": "#DCCBAF",
+    "success": "#2F6A4F",
+    "onSuccess": "#E6F4EA",
+    "warning": "#D98A3C",
+    "onWarning": "#FFF3E0",
+    "error": "#9B2226",
+    "onError": "#FFEBEE",
+    "info": "#4A4A4A",
+    "onInfo": "#E5E5E0",
+    "border": "#262626",
+    "borderStrong": "#3A3A3A",
+    "divider": "#1A1A1A",
+    "muted": "#8C8C8C",
+    "onBrand": "#0A0A0A"
+  },
+  "typography": {
+    "displayFontFamily": "Cormorant Garamond",
+    "textFontFamily": "Satoshi",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous, cinematic breathing room. Avoid cramming elements. Maintain strict thumb-zone rules for CTAs.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "0",
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Use on sticky headers over scrolling content, bottom tab bar, and bottom-sheet headers.",
+      "Use on floating action buttons (FABs) with a brandTertiary tint base.",
+      "Use as a frosted overlay on featured hero cards over destination photography.",
+      "Always apply a translucent tinted base underneath (>=75% surface) to guarantee text readability.",
+      "Use for premium/status labels (e.g., 'Pro / Elite' tags)."
+    ],
+    "dont's": [
+      "Never apply glass to form fields or dense body text regions.",
+      "Do not over-stack blur layers (max 2 per screen).",
+      "Do not use on low-end Android devices (fallback to solid surfaceSecondary)."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Onboarding & Paywall",
+      "purpose": "Convince users of the elite value and convert them to a paid tier immediately.",
+      "states": {
+        "loading": "Centered minimalist champagne spinner",
+        "empty": null,
+        "error": "Bottom snackbar with retry"
+      },
+      "layout": "Full-screen cinematic background image (dark abstract). A gradient scrim from transparent to 90% #0A0A0A at the bottom. A glass-morphic bottom sheet presenting the 3 subscription tiers (7-day, Monthly, Annual) as selectable cards. Sticky primary CTA 'Unlock GuardTrip' at the bottom. Use segmented controls or radio cards for pricing comparison."
+    },
+    {
+      "name": "Home / Hyper-Local Discovery",
+      "purpose": "Inspire travel while immediately offering safety and expense utility.",
+      "states": {
+        "loading": "Skeleton cards with subtle shimmer",
+        "empty": "Stylized empty state requesting location permissions.",
+        "error": "Readable message with a retry button centered."
+      },
+      "layout": "Hero image card (Paris at night) with a glass frosted title overlay. Below, a horizontal scroll of 'Dynamic Expenses' (transit, entry fees). Use a single column for detailed hotspots with large photography. Avoid dense dashboards; let the images shine. Sticky primary CTA is not needed here as it's a feed."
+    },
+    {
+      "name": "Safety Radar Map",
+      "purpose": "Provide tactical, high-contrast situational awareness for nearby risks.",
+      "states": {
+        "loading": "Pulsing map base layer",
+        "empty": "Map view with a 'No active threats' success toast",
+        "error": "Error boundary overlay on the map"
+      },
+      "layout": "Edge-to-edge dark map layer. Z-ordering ensures alerts are top-layer. Translucent red polygons (error color) for hazard zones with solid strokes. A floating glassmorphic search bar at the top and a FAB for 'Report Incident' at the bottom right. Collapsible bottom sheet for a list view of active alerts."
+    },
+    {
+      "name": "Travel Partner Finder",
+      "purpose": "Securely match solo travelers with strict safety filters.",
+      "states": {
+        "loading": "Skeleton profiles",
+        "empty": "Illustration of a solo traveler with text 'No matches in this area yet.'",
+        "error": "Connection error message."
+      },
+      "layout": "Card-based feed. Each partner card uses high-quality photography, faded at the bottom with a gradient scrim, displaying name, language, and a verified badge. Floating top pill filter for 'Gender Match' and 'Travel Style'. Sticky action button for 'Buddy Chat'."
+    },
+    {
+      "name": "Buddy Chat & AI Assistant",
+      "purpose": "Secure, reliable, and premium communication with live tracking.",
+      "states": {
+        "loading": "Chat bubble skeleton",
+        "empty": "Start a conversation empty state",
+        "error": "Message failed to send indicator inline"
+      },
+      "layout": "Standard chat interface but elevated. Dark grey bubbles (surfaceSecondary) for incoming, Champagne gold (brandTertiary) for outgoing. Live GPS sharing widget appears as an interactive glassmorphic card within the chat stream. Delivered/Read receipts appended to outgoing bubbles."
+    }
+  ],
+  "images": {
+    "paywall_bg": {
+      "url": "https://images.pexels.com/photos/31650443/pexels-photo-31650443.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Elegant abstract dark silk fabric"
+    },
+    "home_paris": {
+      "url": "https://images.unsplash.com/photo-1499856871958-5b9627545d1a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1ODh8MHwxfHNlYXJjaHwxfHxwYXJpcyUyMGF0JTIwbmlnaHQlMjBjaXR5JTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc4OTY5MjQ4N3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Paris architecture at night"
+    },
+    "tactical_radar": {
+      "url": "https://images.unsplash.com/photo-1515128926115-1da1b3c702c9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NTZ8MHwxfHNlYXJjaHwxfHx0YWN0aWNhbCUyMHJhZGFyJTIwbWFwJTIwZGFya3xlbnwwfHx8fDE3ODk2OTI0ODd8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Tactical dark map view"
+    },
+    "solo_traveler": {
+      "url": "https://images.unsplash.com/photo-1527631746610-bca00a040d60?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjd8MHwxfHNlYXJjaHwxfHx3b21hbiUyMHRyYXZlbGVyJTIwd2Fsa2luZyUyMGFsb25lfGVufDB8fHx8MTc4OTY5MjQ4N3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Woman traveler walking alone"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the Dark-First Glass/Luxe aesthetic. Do NOT use pure black backgrounds for text; stick to the provided surface tokens to prevent eye strain.",
+    "Implement the hard paywall immediately after signup. Do not allow users to bypass the paywall into the app without a valid subscription tier selection.",
+    "Ensure all glassmorphic components use a tinted base background with >=75% opacity to guarantee text readability, especially over dynamic maps or detailed photos.",
+    "For the Safety Radar map, rely heavily on z-ordering to ensure threat polygons and incident alerts sit unambiguously above standard map layers. Use the 'error' token strictly for hazard zones.",
+    "Enforce the gradient scrim (transparent to 90% surfaceInverse) on all hero images and destination cards before placing text over them.",
+    "Use Cormorant Garamond exclusively for large headings, promotional text, and premium tier pricing. All functional text, chat messages, and data must use Satoshi for legibility.",
+    "Make sure touch targets are minimally 44x44pt.",
+    "All BANNED colors (Blues, Purples) must be completely avoided. The UI relies strictly on the Champagne Gold accents against dark obsidian grays."
+  ]
+}
