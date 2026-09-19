@@ -1,12 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, ImageBackground,
+  FlatList, Dimensions, NativeSyntheticEvent, NativeScrollEvent,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, spacing, radius, fonts } from "@/src/theme";
 import { api } from "@/src/api";
+
+const SCREEN_W = Dimensions.get("window").width;
+const HERO_H = 420;
 
 export default function HotspotDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -15,6 +19,8 @@ export default function HotspotDetail() {
   const [data, setData] = useState<any>(null);
   const [tip, setTip] = useState<string | null>(null);
   const [tipLoading, setTipLoading] = useState(false);
+  const [pageIdx, setPageIdx] = useState(0);
+  const galleryRef = useRef<FlatList<string>>(null);
 
   useEffect(() => {
     (async () => {
@@ -34,13 +40,35 @@ export default function HotspotDetail() {
     <View style={styles.loading}><ActivityIndicator color={colors.brandPrimary} /></View>
   );
 
+  const photos: string[] = (data.photos && data.photos.length ? data.photos : [data.image_url]).filter(Boolean);
+  const onScrollEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const i = Math.round(e.nativeEvent.contentOffset.x / SCREEN_W);
+    if (i !== pageIdx) setPageIdx(i);
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: colors.surface }}>
       <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + spacing.xl }} showsVerticalScrollIndicator={false}>
-        <ImageBackground source={{ uri: data.image_url }} style={styles.hero}>
-          <LinearGradient colors={["rgba(10,10,10,0.4)", "transparent", "rgba(10,10,10,0.95)"]}
-            locations={[0, 0.4, 1]} style={StyleSheet.absoluteFill} />
-          <View style={[styles.heroBar, { paddingTop: insets.top + spacing.md }]}>
+        <View style={{ height: HERO_H }}>
+          <FlatList
+            ref={galleryRef}
+            data={photos}
+            keyExtractor={(u, i) => `${i}-${u.slice(-20)}`}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={onScrollEnd}
+            renderItem={({ item }) => (
+              <ImageBackground source={{ uri: item }} style={{ width: SCREEN_W, height: HERO_H }}
+                testID="hotspot-gallery-img">
+                <LinearGradient
+                  colors={["rgba(10,10,10,0.4)", "transparent", "rgba(10,10,10,0.95)"]}
+                  locations={[0, 0.4, 1]} style={StyleSheet.absoluteFill}
+                />
+              </ImageBackground>
+            )}
+          />
+          <View style={[styles.heroBar, { paddingTop: insets.top + spacing.md, position: "absolute", left: 0, right: 0 }]} pointerEvents="box-none">
             <Pressable onPress={() => router.back()} style={styles.backBtn} testID="hotspot-back">
               <Text style={styles.backText}>←</Text>
             </Pressable>
@@ -48,11 +76,21 @@ export default function HotspotDetail() {
               <Text style={styles.ratingText}>★ {data.rating}</Text>
             </View>
           </View>
-          <View style={styles.heroBottom}>
+          {photos.length > 1 ? (
+            <View style={styles.dots} pointerEvents="none">
+              {photos.map((_, i) => (
+                <View key={i} style={[styles.dot, i === pageIdx && styles.dotActive]} />
+              ))}
+            </View>
+          ) : null}
+          <View style={styles.heroBottom} pointerEvents="none">
             <Text style={styles.location}>{data.city.toUpperCase()} · {data.country.toUpperCase()}</Text>
             <Text style={styles.name}>{data.name}</Text>
+            {photos.length > 1 ? (
+              <Text style={styles.photoCount}>{pageIdx + 1} / {photos.length} photos</Text>
+            ) : null}
           </View>
-        </ImageBackground>
+        </View>
         <View style={styles.body}>
           <Text style={styles.desc}>{data.description}</Text>
           <View style={styles.tags}>
@@ -104,14 +142,18 @@ export default function HotspotDetail() {
 const styles = StyleSheet.create({
   loading: { flex: 1, backgroundColor: colors.surface, justifyContent: "center", alignItems: "center" },
   hero: { height: 420, justifyContent: "space-between" },
-  heroBar: { flexDirection: "row", justifyContent: "space-between", paddingHorizontal: spacing.lg },
+  heroBar: { flexDirection: "row", justifyContent: "space-between", paddingHorizontal: spacing.lg, zIndex: 2 },
   backBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(10,10,10,0.6)",
     justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: colors.border },
   backText: { color: colors.onSurface, fontSize: 22 },
   rating: { backgroundColor: "rgba(10,10,10,0.7)", paddingHorizontal: spacing.md, paddingVertical: 8,
     borderRadius: radius.pill, borderWidth: 1, borderColor: colors.brandPrimary },
   ratingText: { color: colors.brandPrimary, fontWeight: "700" },
-  heroBottom: { padding: spacing.xl },
+  heroBottom: { padding: spacing.xl, position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 2 },
+  dots: { position: "absolute", top: 60, alignSelf: "center", flexDirection: "row", gap: 6, zIndex: 2 },
+  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: "rgba(255,255,255,0.35)" },
+  dotActive: { backgroundColor: colors.brandPrimary, width: 18 },
+  photoCount: { color: colors.brandPrimary, fontSize: 11, letterSpacing: 1.5, marginTop: 6, fontWeight: "600" },
   location: { color: colors.brandPrimary, letterSpacing: 3, fontSize: 10, fontWeight: "700" },
   name: { fontFamily: fonts.display, color: colors.onSurface, fontSize: 40, lineHeight: 44, marginTop: 4 },
   body: { padding: spacing.xl, gap: spacing.lg },

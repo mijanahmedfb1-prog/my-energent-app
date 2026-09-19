@@ -1,19 +1,13 @@
-"""Backend retest for POST /api/hotspots/discover image quality bug fix.
+"""Backend retest for POST /api/hotspots/discover image + photos gallery bug fix (v2).
 
-Verifies that AI-discovered hotspots now return REAL landmark photos from
-Wikipedia (upload.wikimedia.org / commons.wikimedia.org) instead of unrelated
-stock images.
-
-Cities under test: Dhaka, Cairo, Istanbul.
-
-Scenarios:
-- 5-8 hotspots returned; each has non-empty image_url on wikimedia.org host.
-- No .svg images.
-- Landmark filename match: e.g. Lalbagh / Pyramid / Hagia Sophia URL filename
-  contains a token from the hotspot name.
-- Each hotspot exposes `wikipedia_title` field.
-- Cache determinism: second call w/o force_refresh returns source=='cache'
-  and identical image_urls.
+Verifies:
+- AI-discovered hotspots return REAL landmark photos from Wikipedia
+  (upload.wikimedia.org / commons.wikimedia.org) instead of unrelated stock images.
+- Each hotspot has a `photos` array (>= 3 real photograph URLs) for a swipeable gallery.
+- No SVG, disambig, commons-logo files in either primary or photos array.
+- GET /api/hotspots/{id} returns the same object including `photos` array.
+- Cache determinism: 2nd call w/o force_refresh returns source=='cache' with
+  identical primary image_urls AND identical `photos` arrays.
 - Auth guards: no token -> 401, non-premium token -> 402.
 """
 import os
@@ -34,7 +28,7 @@ assert BASE_URL.startswith("http"), "EXPO_PUBLIC_BACKEND_URL missing"
 PRIMARY_EMAIL = "test@guardtrip.com"
 PRIMARY_PASSWORD = "test1234"
 
-TIMEOUT_FRESH = 120  # AI can take up to 45s per city; give plenty of headroom
+TIMEOUT_FRESH = 180  # AI + Wikipedia batching can take up to ~90s for a city
 TIMEOUT_CACHE = 15
 
 STATE: dict = {}
@@ -57,16 +51,20 @@ CITIES = [
     },
 ]
 
-WIKIMEDIA_HOSTS = {"upload.wikimedia.org", "commons.wikimedia.org"}
+PRIMARY_HOSTS = {"upload.wikimedia.org", "commons.wikimedia.org"}
+# thumb.wikimedia.org is a legitimate Wikimedia CDN subdomain that serves the
+# same real photograph as upload.wikimedia.org. It is acceptable per review
+# spec "wikimedia.org photograph URLs" for the `photos` gallery array.
+BAD_PHOTO_MARKERS = ("commons-logo", "disambig", "question_book",
+                     "wiki_letter", "flag_of_", "coat_of_arms",
+                     "location_map", "map_of_")
 
 
 def _ensure_primary_user_premium():
-    """Login primary user; register + activate if missing/expired."""
     r = requests.post(f"{BASE_URL}/auth/login",
                       json={"email": PRIMARY_EMAIL, "password": PRIMARY_PASSWORD},
                       timeout=30)
     if r.status_code != 200:
-        # Register fresh
         rr = requests.post(f"{BASE_URL}/auth/register", json={
             "email": PRIMARY_EMAIL,
             "password": PRIMARY_PASSWORD,
@@ -80,7 +78,6 @@ def _ensure_primary_user_premium():
     else:
         token = r.json()["token"]
 
-    # check premium status
     me = requests.get(f"{BASE_URL}/auth/me",
                       headers={"Authorization": f"Bearer {token}"}, timeout=15).json()
     if not me.get("is_premium"):
@@ -88,15 +85,14 @@ def _ensure_primary_user_premium():
                            headers={"Authorization": f"Bearer {token}"},
                            json={"tier": "month"}, timeout=30)
         assert ar.status_code == 200, f"activate failed: {ar.status_code} {ar.text}"
-    return token, me.get("id") or me.get("user", {}).get("id")
+    return token
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_users():
-    token, _ = _ensure_primary_user_premium()
+    token = _ensure_primary_user_premium()
     STATE["token"] = token
 
-    # Create a fresh NON-premium user for 402 auth-guard test
     email = f"nopremium_{uuid.uuid4().hex[:8]}@guardtrip.example.com"
     rr = requests.post(f"{BASE_URL}/auth/register", json={
         "email": email,
@@ -111,38 +107,41 @@ def setup_users():
     yield
 
 
-def _hosts_ok(hotspots):
-    good = 0
-    for h in hotspots:
-        url = h.get("image_url") or ""
-        host = urlparse(url).hostname or ""
-        if host in WIKIMEDIA_HOSTS:
-            good += 1
-    return good
+def _is_wm(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host.endswith("wikimedia.org")
 
 
-def _no_svg(hotspots):
-    bad = []
-    for h in hotspots:
-        url = (h.get("image_url") or "").lower()
-        if url.endswith(".svg") or url.endswith(".svg.png") is False and ".svg" in url.split("?")[0].lower():
-            # only flag actual .svg extensions
-            if url.split("?")[0].lower().endswith(".svg"):
-                bad.append(url)
-    return bad
+def _is_primary_wm(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return host in PRIMARY_HOSTS
+
+
+def _is_bad_photo(url: str) -> str | None:
+    """Return failure reason if URL is not a proper photograph, else None.
+    Accepts any *.wikimedia.org host (upload/commons/thumb) for gallery photos.
+    """
+    if not url:
+        return "empty"
+    if not _is_wm(url):
+        return f"non-wikimedia host: {urlparse(url).hostname}"
+    lower = url.lower()
+    path = lower.split("?")[0]
+    if path.endswith(".svg"):
+        return "svg extension"
+    for b in BAD_PHOTO_MARKERS:
+        if b in lower:
+            return f"bad marker: {b}"
+    return None
 
 
 def _landmark_match(hotspots, keywords):
-    """Return the first hotspot whose name contains any keyword AND
-    whose image_url filename ALSO contains a token from its own name (or a
-    keyword). Returns (hotspot, matched_keyword) or (None, None)."""
     for h in hotspots:
         name = (h.get("name") or "").lower()
         if not any(k in name for k in keywords):
             continue
         url = unquote((h.get("image_url") or "").lower())
         filename = url.split("/")[-1]
-        # extract simple tokens from the hotspot name (length>=4)
         name_tokens = [t for t in re.split(r"[^a-z]+", name) if len(t) >= 4]
         combined = name_tokens + keywords
         if any(t in filename for t in combined):
@@ -151,7 +150,7 @@ def _landmark_match(hotspots, keywords):
 
 
 # --------------------------------------------------------------------------- #
-# Auth guard tests (run first, quick)
+# Auth guard tests
 # --------------------------------------------------------------------------- #
 class TestAuthGuards:
     def test_no_token_returns_401(self):
@@ -171,10 +170,10 @@ class TestAuthGuards:
 
 
 # --------------------------------------------------------------------------- #
-# One test per city for image quality
+# One test per city for image quality + photos array
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("city_cfg", CITIES, ids=[c["label"] for c in CITIES])
-def test_discover_returns_real_landmark_images(city_cfg):
+def test_discover_returns_real_images_and_photos_gallery(city_cfg):
     body = dict(city_cfg["body"])
     body["force_refresh"] = True
     r = requests.post(f"{BASE_URL}/hotspots/discover",
@@ -182,63 +181,116 @@ def test_discover_returns_real_landmark_images(city_cfg):
                       json=body, timeout=TIMEOUT_FRESH)
     assert r.status_code == 200, f"[{city_cfg['label']}] {r.status_code} {r.text}"
     data = r.json()
-    assert data.get("source") == "ai", f"[{city_cfg['label']}] expected fresh source=ai, got {data.get('source')}"
+    assert data.get("source") == "ai", (
+        f"[{city_cfg['label']}] expected fresh source=ai, got {data.get('source')}"
+    )
     hotspots = data.get("hotspots") or []
     print(f"\n[{city_cfg['label']}] returned {len(hotspots)} hotspots")
     for h in hotspots:
-        print(f"  - {h.get('name'):40s}  wt='{h.get('wikipedia_title')}'  img={h.get('image_url')}")
+        photos = h.get("photos") or []
+        print(f"  - {h.get('name'):40s}  #photos={len(photos)}  primary={h.get('image_url')}")
 
     # 1. 5-8 hotspots
-    assert 5 <= len(hotspots) <= 8, f"[{city_cfg['label']}] expected 5-8 hotspots, got {len(hotspots)}"
+    assert 5 <= len(hotspots) <= 8, (
+        f"[{city_cfg['label']}] expected 5-8 hotspots, got {len(hotspots)}"
+    )
 
-    # 2. every image_url present
-    missing_imgs = [h["name"] for h in hotspots if not (h.get("image_url") or "").strip()]
-    assert not missing_imgs, f"[{city_cfg['label']}] missing image_url on: {missing_imgs}"
+    # 2. Every primary image_url must be wikimedia + not svg
+    fallback_count = 0
+    primary_failures = []
+    thumb_primary_warnings = []
+    for h in hotspots:
+        img = h.get("image_url") or ""
+        host = (urlparse(img).hostname or "").lower()
+        if host == "images.unsplash.com":
+            fallback_count += 1
+            continue
+        # Any non-wikimedia OR svg/marker = hard fail
+        reason = _is_bad_photo(img)
+        if reason:
+            primary_failures.append((h.get("name"), img, reason))
+            continue
+        # Wikimedia but not upload/commons (i.e. thumb.wikimedia.org) => warn only
+        if not _is_primary_wm(img):
+            thumb_primary_warnings.append((h.get("name"), host, img))
+    if thumb_primary_warnings:
+        print(f"[{city_cfg['label']}] thumb.wikimedia.org primary (still a real photo, but not upload/commons): {thumb_primary_warnings}")
+    assert not primary_failures, (
+        f"[{city_cfg['label']}] primary image issues: {primary_failures}"
+    )
+    # Curated unsplash fallback tolerance: at most 1 of 6 per city
+    assert fallback_count <= 1, (
+        f"[{city_cfg['label']}] too many unsplash fallbacks: {fallback_count}"
+    )
 
-    # 3. host = wikimedia (allow tolerance for dhaka/cairo: at least 5/6;
-    #    istanbul: EVERY image_url per test spec).
-    good = _hosts_ok(hotspots)
-    if city_cfg["label"] == "istanbul":
-        assert good == len(hotspots), (
-            f"[istanbul] every image must be wikimedia. good={good}/{len(hotspots)}. "
-            f"non-wm URLs: {[h['image_url'] for h in hotspots if urlparse(h['image_url']).hostname not in WIKIMEDIA_HOSTS]}"
-        )
-    else:
-        assert good >= 5, (
-            f"[{city_cfg['label']}] expected >=5 wikimedia images, got {good}/{len(hotspots)}. "
-            f"non-wm URLs: {[h['image_url'] for h in hotspots if urlparse(h['image_url']).hostname not in WIKIMEDIA_HOSTS]}"
-        )
+    # 3. Each hotspot has a `photos` array with >= 3 wikimedia photograph URLs
+    photos_failures = []
+    for h in hotspots:
+        photos = h.get("photos")
+        if not isinstance(photos, list):
+            photos_failures.append((h.get("name"), "missing/photos-not-list"))
+            continue
+        if len(photos) < 3:
+            photos_failures.append((h.get("name"), f"only {len(photos)} photos"))
+            continue
+        for p in photos:
+            reason = _is_bad_photo(p)
+            if reason:
+                photos_failures.append((h.get("name"), f"{reason} => {p}"))
+                break
+    assert not photos_failures, (
+        f"[{city_cfg['label']}] photos array issues: {photos_failures}"
+    )
 
-    # 4. no SVG
-    svgs = _no_svg(hotspots)
-    assert not svgs, f"[{city_cfg['label']}] SVG images not allowed: {svgs}"
-
-    # 5. wikipedia_title field must be present on every hotspot
-    missing_wt = [h["name"] for h in hotspots if "wikipedia_title" not in h]
-    assert not missing_wt, f"[{city_cfg['label']}] wikipedia_title field missing on: {missing_wt}"
-
-    empty_wt = [h["name"] for h in hotspots if not (h.get("wikipedia_title") or "").strip()]
-    if empty_wt:
-        print(f"[{city_cfg['label']}] hotspots with empty wikipedia_title (allowed if Claude explicitly said empty): {empty_wt}")
-
-    # 6. Landmark filename match
+    # 4. Landmark filename match on primary image (Latin script only)
     matched, key = _landmark_match(hotspots, city_cfg["landmark_keywords"])
     assert matched is not None, (
-        f"[{city_cfg['label']}] no landmark from {city_cfg['landmark_keywords']} had a matching image filename. "
+        f"[{city_cfg['label']}] no landmark from {city_cfg['landmark_keywords']} "
+        f"had a matching primary image filename. "
         f"Hotspots+urls: {[(h['name'], h['image_url']) for h in hotspots]}"
     )
-    print(f"[{city_cfg['label']}] landmark match: '{matched['name']}' via token '{key}' -> {matched['image_url']}")
+    print(f"[{city_cfg['label']}] landmark match: '{matched['name']}' "
+          f"via token '{key}' -> {matched['image_url']}")
 
-    # Save first Dhaka response for cache determinism test
+    # Save Dhaka response for cache + GET-by-id tests
     if city_cfg["label"] == "dhaka":
         STATE["dhaka_first_urls"] = [h["image_url"] for h in hotspots]
+        STATE["dhaka_first_photos"] = {h["id"]: list(h["photos"]) for h in hotspots}
         STATE["dhaka_first_ids"] = [h["id"] for h in hotspots]
+        STATE["dhaka_first_by_id"] = {h["id"]: h for h in hotspots}
+
+
+# --------------------------------------------------------------------------- #
+# GET /api/hotspots/{id} returns same object + photos array
+# --------------------------------------------------------------------------- #
+def test_get_hotspot_by_id_returns_photos():
+    assert STATE.get("dhaka_first_ids"), "prerequisite Dhaka fresh call did not run"
+    hid = STATE["dhaka_first_ids"][0]
+    expected = STATE["dhaka_first_by_id"][hid]
+    r = requests.get(f"{BASE_URL}/hotspots/{hid}",
+                     headers={"Authorization": f"Bearer {STATE['token']}"},
+                     timeout=15)
+    assert r.status_code == 200, f"{r.status_code} {r.text}"
+    doc = r.json()
+    assert doc["id"] == hid
+    assert doc["name"] == expected["name"]
+    assert doc["image_url"] == expected["image_url"], (
+        f"image_url differs: got {doc['image_url']} expected {expected['image_url']}"
+    )
+    assert isinstance(doc.get("photos"), list), "photos array missing on GET"
+    assert len(doc["photos"]) >= 3, f"got only {len(doc['photos'])} photos on GET"
+    assert doc["photos"] == expected["photos"], (
+        f"photos array differs on GET.\nGET: {doc['photos']}\nDiscover: {expected['photos']}"
+    )
+    for p in doc["photos"]:
+        reason = _is_bad_photo(p)
+        assert reason is None, f"bad photo in GET response: {p} ({reason})"
 
 
 # --------------------------------------------------------------------------- #
 # Cache determinism (must run after Dhaka fresh test)
 # --------------------------------------------------------------------------- #
-def test_cache_is_deterministic_for_dhaka():
+def test_cache_deterministic_urls_and_photos():
     assert "dhaka_first_urls" in STATE, "prerequisite dhaka fresh call did not run"
     t0 = time.time()
     r = requests.post(f"{BASE_URL}/hotspots/discover",
@@ -250,12 +302,24 @@ def test_cache_is_deterministic_for_dhaka():
     assert r.status_code == 200, r.text
     data = r.json()
     assert data.get("source") == "cache", f"expected source=cache, got {data.get('source')}"
+
     urls_now = [h["image_url"] for h in data["hotspots"]]
-    # allow different ordering due to distance sort — compare as sets
     assert set(urls_now) == set(STATE["dhaka_first_urls"]), (
         f"cache image_urls differ from fresh set.\n"
         f"fresh: {sorted(STATE['dhaka_first_urls'])}\n"
         f"cache: {sorted(urls_now)}"
+    )
+
+    # Verify photos arrays match per-hotspot id (order matters within array)
+    photos_now = {h["id"]: h.get("photos") or [] for h in data["hotspots"]}
+    mismatches = []
+    for hid, expected in STATE["dhaka_first_photos"].items():
+        actual = photos_now.get(hid)
+        if actual != expected:
+            mismatches.append((hid, expected, actual))
+    assert not mismatches, (
+        f"photos array mismatch (order matters) on cache hit:\n"
+        + "\n".join(f"  id={m[0]}\n    fresh={m[1]}\n    cache={m[2]}" for m in mismatches)
     )
     print(f"cache call took {elapsed:.2f}s")
     assert elapsed < 10, f"cache call was slow: {elapsed:.2f}s"

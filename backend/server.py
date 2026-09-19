@@ -338,6 +338,7 @@ import re
 import urllib.parse as _urlparse
 
 DISCOVER_TTL_DAYS = 14
+DISCOVER_CACHE_VERSION = "v2"  # bump when image logic changes → invalidates old cache
 
 FALLBACK_IMAGES = [
     "https://images.unsplash.com/photo-1500835556837-99ac94a94552?w=800",  # travel skyline
@@ -387,6 +388,53 @@ async def _wiki_pageimage(client: httpx.AsyncClient, title: str) -> Optional[str
     except Exception:
         pass
     return None
+
+
+def _is_photo_url(u: str) -> bool:
+    if not u:
+        return False
+    l = u.lower()
+    if l.endswith(".svg") or ".svg?" in l:
+        return False
+    bad = ("commons-logo", "disambig", "question_book", "wiki_letter", "flag_of_",
+           "coat_of_arms", "location_map", "map_of_", ".pdf")
+    return not any(b in l for b in bad)
+
+
+async def _wiki_page_photos(client: httpx.AsyncClient, title: str, limit: int = 10) -> list:
+    """Return real photo URLs used on a Wikipedia article's page (excluding icons/svgs/maps)."""
+    try:
+        url = (
+            "https://en.wikipedia.org/w/api.php?action=query&format=json&redirects=1"
+            "&generator=images&gimlimit=15&prop=imageinfo"
+            "&iiprop=url|size|mime&iiurlwidth=1000&titles="
+            + _urlparse.quote(title)
+        )
+        r = await client.get(url, headers={"User-Agent": WIKI_UA, "Accept": "application/json"})
+        if r.status_code != 200:
+            return []
+        pages = ((r.json().get("query") or {}).get("pages") or {})
+        photos = []
+        for _, page in pages.items():
+            infos = page.get("imageinfo") or []
+            if not infos:
+                continue
+            info = infos[0]
+            mime = (info.get("mime") or "").lower()
+            if "image" not in mime or "svg" in mime:
+                continue
+            width = info.get("width") or 0
+            height = info.get("height") or 0
+            if width < 400 or height < 300:  # skip tiny icons
+                continue
+            best = info.get("thumburl") or info.get("url")
+            if _is_photo_url(best):
+                photos.append(best)
+            if len(photos) >= limit:
+                break
+        return photos
+    except Exception:
+        return []
 
 
 async def _commons_search_image(client: httpx.AsyncClient, query: str) -> Optional[str]:
@@ -454,38 +502,56 @@ async def _wiki_opensearch(client: httpx.AsyncClient, query: str) -> Optional[st
     return None
 
 
-async def _fetch_place_image(place: str, city: str, idx: int, wiki_title: Optional[str] = None) -> str:
+async def _fetch_place_images(place: str, city: str, idx: int, wiki_title: Optional[str] = None) -> dict:
     """
-    Order of attempts to get a REAL photo of the exact landmark:
-      1. Wikipedia page image using the AI-supplied `wiki_title` (usually spot-on)
-      2. Wikipedia page image on the cleaned name
-      3. Wikipedia opensearch("<name> <city>") -> page image
-      4. Wikimedia Commons search("<name> <city>")
-      5. Curated fallback image
+    Return {'primary': str, 'photos': [str, ...]}.
+    Photos are always REAL photographs of the exact landmark (Wikipedia article images).
     """
     clean = _clean_place(place)
     async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-        # 1. AI-supplied Wikipedia title
+        # Resolve the best Wikipedia title we can
+        resolved_title = None
         if wiki_title:
-            img = await _wiki_pageimage(client, wiki_title)
-            if img:
-                return img
-        # 2. Direct pageimage on clean name
-        img = await _wiki_pageimage(client, clean)
-        if img:
-            return img
-        # 3. Search "<name> <city>" then pageimage
-        title = await _wiki_opensearch(client, f"{clean} {city}")
-        if title:
-            img = await _wiki_pageimage(client, title)
-            if img:
-                return img
-        # 4. Commons file search for "<name> <city>"
-        img = await _commons_search_image(client, f"{clean} {city}")
-        if img:
-            return img
-        # 5. Fallback
-    return FALLBACK_IMAGES[idx % len(FALLBACK_IMAGES)]
+            resolved_title = wiki_title
+        if not resolved_title:
+            t = await _wiki_opensearch(client, f"{clean} {city}") or await _wiki_opensearch(client, clean)
+            resolved_title = t
+
+        primary = None
+        photos: list = []
+
+        if resolved_title:
+            primary = await _wiki_pageimage(client, resolved_title)
+            gallery = await _wiki_page_photos(client, resolved_title, limit=8)
+            photos = [g for g in gallery if _is_photo_url(g)]
+
+        # Ensure primary is included and comes first
+        if primary:
+            photos = [primary] + [p for p in photos if p != primary]
+        elif photos:
+            primary = photos[0]
+
+        # Fall back to Commons search only if we still have nothing
+        if not primary:
+            fb = await _commons_search_image(client, f"{clean} {city}")
+            if fb:
+                primary = fb
+                photos = [fb]
+
+    if not primary:
+        primary = FALLBACK_IMAGES[idx % len(FALLBACK_IMAGES)]
+        photos = [primary]
+
+    # Cap at 6 unique photos
+    seen = set()
+    uniq: list = []
+    for p in photos:
+        if p not in seen:
+            seen.add(p); uniq.append(p)
+        if len(uniq) >= 6:
+            break
+    return {"primary": primary, "photos": uniq}
+
 
 
 def _extract_json_array(text: str):
@@ -540,7 +606,7 @@ async def discover_hotspots(body: DiscoverReq, user: dict = Depends(require_prem
         raise HTTPException(400, "city is required")
     city = body.city.strip()
     country = (body.country or "").strip()
-    cache_key = f"ai:{city.lower()}:{country.lower()}"
+    cache_key = f"ai:{DISCOVER_CACHE_VERSION}:{city.lower()}:{country.lower()}"
 
     # Return cached spots if fresh
     if not body.force_refresh:
@@ -568,8 +634,8 @@ async def discover_hotspots(body: DiscoverReq, user: dict = Depends(require_prem
 
     # Fetch images in parallel to keep response snappy
     candidates = [s for s in raw_spots[:8] if str(s.get("name", "")).strip()]
-    image_urls = await asyncio.gather(*[
-        _fetch_place_image(
+    image_bundles = await asyncio.gather(*[
+        _fetch_place_images(
             str(s["name"]).strip(),
             city,
             i,
@@ -580,7 +646,7 @@ async def discover_hotspots(body: DiscoverReq, user: dict = Depends(require_prem
     saved = []
     for i, s in enumerate(candidates):
         name = str(s.get("name", "")).strip()
-        image_url = image_urls[i]
+        bundle = image_bundles[i]
         doc = {
             "id": str(uuid.uuid4()),
             "city": city,
@@ -588,7 +654,8 @@ async def discover_hotspots(body: DiscoverReq, user: dict = Depends(require_prem
             "name": name,
             "wikipedia_title": str(s.get("wikipedia_title") or "").strip(),
             "description": str(s.get("description", "")).strip()[:280],
-            "image_url": image_url,
+            "image_url": bundle["primary"],
+            "photos": bundle["photos"],
             "lat": float(s.get("lat") or body.lat),
             "lng": float(s.get("lng") or body.lng),
             "entry_fee_local": str(s.get("entry_fee_local", "Free")),
